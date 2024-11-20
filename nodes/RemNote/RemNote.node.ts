@@ -1,131 +1,144 @@
 import {
-	IDataObject,
+	IExecuteFunctions,
 	INodeExecutionData,
 	INodeType,
 	INodeTypeDescription,
 } from 'n8n-workflow';
+import WebSocket from 'ws';
 
 export class RemNote implements INodeType {
 	description: INodeTypeDescription = {
-        displayName: 'RemNote',
-        name: 'remNote',
-        icon: 'file:remNote.svg',
-        group: ['transform'],
-        version: 1,
-        description: 'Connect to RemNote',
-        defaults: {
-            name: 'RemNote',
-        },
-        inputs: ['main'],
-        outputs: ['main'],
-        // credentials: [
-        //     {
-        //         name: 'friendGridApi',
-        //         required: true,
-        //     },
-        // ],
+		displayName: 'RemNote',
+		name: 'remNote',
+		icon: 'file:RemNote.svg',
+		group: ['output'],
+		version: 1,
+		subtitle: '={{$parameter["operation"]}}',
+		description: 'Create and manage RemNote entries via plugin',
+		defaults: {
+			name: 'RemNote',
+		},
+		inputs: ['main'],
+		outputs: ['main'],
 		properties: [
 			{
-                displayName: 'Resource',
-                name: 'resource',
-                type: 'options',
-                options: [
-                    {
-                        name: 'Contact',
-                        value: 'contact',
-                    },
-                ],
-                default: 'contact',
-                noDataExpression: true,
-                required: true,
-                description: 'Create a new contact',
-            },
-            {
-                displayName: 'Operation',
-                name: 'operation',
-                type: 'options',
-                displayOptions: {
-                    show: {
-                        resource: [
-                            'contact',
-                        ],
-                    },
-                },
-                options: [
-                    {
-                        name: 'Create',
-                        value: 'create',
-                        description: 'Create a contact',
-                        action: 'Create a contact',
-                    },
-                ],
-                default: 'create',
-                noDataExpression: true,
-            },
-            {
-                displayName: 'Email',
-                name: 'email',
-                type: 'string',
-                required: true,
-                displayOptions: {
-                    show: {
-                        operation: [
-                            'create',
-                        ],
-                        resource: [
-                            'contact',
-                        ],
-                    },
-                },
-                default:'',
-                placeholder: 'name@email.com',
-                description:'Primary email for the contact',
-            },
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				options: [
+					{
+						name: 'Create Rem',
+						value: 'createRem',
+						description: 'Create a new rem',
+					},
+				],
+				default: 'createRem',
+				noDataExpression: true,
+			},
+			{
+				displayName: 'Content',
+				name: 'content',
+				type: 'string',
+				default: '',
+				description: 'The content of the rem',
+				required: true,
+				displayOptions: {
+					show: {
+						operation: ['createRem'],
+					},
+				},
+			},
+			{
+				displayName: 'Parent Rem ID',
+				name: 'parentId',
+				type: 'string',
+				default: '',
+				description: 'ID of the parent rem (optional)',
+				required: false,
+				displayOptions: {
+					show: {
+						operation: ['createRem'],
+					},
+				},
+			},
+			{
+				displayName: 'Plugin WebSocket Port',
+				name: 'port',
+				type: 'number',
+				default: 3333,
+				description: 'Port number where the RemNote plugin is listening',
+				required: true,
+			},
 		],
 	};
-	// The execute method will go here
-	async execute(this: any): Promise<INodeExecutionData[][]> {
-        // Handle data coming from previous nodes
-const items = this.getInputData();
-let responseData;
-const returnData = [];
-const resource = this.getNodeParameter('resource', 0) as string;
-const operation = this.getNodeParameter('operation', 0) as string;
 
-// For each item, make an API call to create a contact
-for (let i = 0; i < items.length; i++) {
-	if (resource === 'contact') {
-		if (operation === 'create') {
-			// Get email input
-			const email = this.getNodeParameter('email', i) as string;
-			// Get additional fields input
-			const additionalFields = this.getNodeParameter('additionalFields', i) as IDataObject;
-			const data: IDataObject = {
-				email,
-			};
+	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+		const items = this.getInputData();
+		const returnData: INodeExecutionData[] = [];
+		const operation = this.getNodeParameter('operation', 0) as string;
+		const port = this.getNodeParameter('port', 0) as number;
 
-			Object.assign(data, additionalFields);
+		for (let i = 0; i < items.length; i++) {
+			try {
+				if (operation === 'createRem') {
+					const content = this.getNodeParameter('content', i) as string;
+					const parentId = this.getNodeParameter('parentId', i) as string;
 
-			// Make HTTP request according to https://sendgrid.com/docs/api-reference/
-			const options = {
-				headers: {
-					'Accept': 'application/json',
-				},
-				method: 'PUT',
-				body: {
-					contacts: [
-						data,
-					],
-				},
-				uri: `https://api.sendgrid.com/v3/marketing/contacts`,
-				json: true,
-			};
-			responseData = await this.helpers.requestWithAuthentication.call(this, 'friendGridApi', options);
-			returnData.push(responseData);
+					await new Promise<void>((resolve, reject) => {
+						const ws = new WebSocket(`ws://localhost:${port}`);
+
+						ws.on('error', (error) => {
+							ws.close();
+							reject(new Error(`WebSocket error: ${error.message}`));
+						});
+
+						ws.on('open', () => {
+							ws.send(JSON.stringify({
+								action: 'createRem',
+								text: content,
+								parentId: parentId || null,
+							}));
+						});
+
+						ws.on('message', (data) => {
+							try {
+								const response = JSON.parse(data.toString());
+								if (response.success) {
+									returnData.push({
+										json: response,
+									});
+									ws.close();
+									resolve();
+								} else {
+									ws.close();
+									reject(new Error(response.error));
+								}
+							} catch (error) {
+								ws.close();
+								reject(new Error(`Failed to parse response: ${error.message}`));
+							}
+						});
+
+						// Add timeout
+						setTimeout(() => {
+							ws.close();
+							reject(new Error('WebSocket connection timed out'));
+						}, 10000); // 10 second timeout
+					});
+				}
+			} catch (error) {
+				if (this.continueOnFail()) {
+					returnData.push({
+						json: {
+							error: error.message,
+						},
+					});
+					continue;
+				}
+				throw error;
+			}
 		}
-	}
-}
-// Map data to n8n data structure
-return [this.helpers.returnJsonArray(returnData)];
+
+		return [returnData];
 	}
 }
